@@ -55,7 +55,7 @@ def parse_ssh_log(log_line: str) -> dict:
     host = splitline[3]
 
     event = event_ssh_detection(log_line)
-    user, ip = parse_ssh_feilds(splitline, event)
+    user, ip = parse_ssh_fields(splitline, event)
 
     log_entry = {
         "timestamp": timestamp,
@@ -100,7 +100,7 @@ def get_log_mins(log: dict) -> int:
 def ssh_brute_force_detect(logs: list[dict]) -> list[dict]:
     failed_login = {}
     alerts = []
-    danger_ips = set()
+    danger_ips = []
     for log in logs:
         if log["event"] == "FAILED_LOGIN":
             ip = log["ip"]
@@ -110,16 +110,16 @@ def ssh_brute_force_detect(logs: list[dict]) -> list[dict]:
             
             if len(failed_login[ip]) >= 5:
                 if get_log_mins(log) - get_log_mins(failed_login[ip][0]) < 5:
+                    alerts.append({
+                        "alert": "SSH_BRUTE_FORCE_ATTEMPT",
+                        "ip": ip,
+                        "attempts": len(failed_login[ip]),
+                        "start_time": failed_login[ip][0]["timestamp"],
+                        "end_time": failed_login[ip][-1]["timestamp"]
+                    })
                     if ip not in danger_ips:
-                        danger_ips.add(ip)
-
-                        alerts.append({
-                            "alert": "SSH_BRUTE_FORCE",
-                            "ip": ip,
-                            "attempts": len(failed_login[ip]),
-                            "start_time": failed_login[ip][0]["timestamp"],
-                            "end_time": failed_login[ip][-1]["timestamp"]
-                        })
+                        danger_ips.append(ip)
+                    failed_login[ip].clear()
 
                 else:
                     while get_log_mins(log) - get_log_mins(failed_login[ip][0]) >= 5:
@@ -127,10 +127,73 @@ def ssh_brute_force_detect(logs: list[dict]) -> list[dict]:
 
     return alerts
 
-#def ssh_user_enumeration_detect(logs: list[dict]) -> list[dict]:
+def ssh_user_enumeration_detect(logs: list[dict]) -> list[dict]:
+    failed_user = {}
+    alerts = []
+    danger_ips = []
+    for log in logs:
+        if log["event"] == "INVALID_USER":
+            ip = log["ip"]
+            if ip not in failed_user:
+                failed_user[ip] = deque()
+            failed_user[ip].append(log)
+            
+            if len(failed_user[ip]) >= 5:
+                if get_log_mins(log) - get_log_mins(failed_user[ip][0]) < 5:
+                    alerts.append({
+                        "alert": "SSH_USER_ENUMERATION",
+                        "ip": ip,
+                        "attempts": len(failed_user[ip]),
+                        "start_time": failed_user[ip][0]["timestamp"],
+                        "end_time": failed_user[ip][-1]["timestamp"]
+                    })
+                    if ip not in danger_ips:
+                        danger_ips.append(ip)
+                    failed_user[ip].clear()
+
+                else:
+                    while get_log_mins(log) - get_log_mins(failed_user[ip][0]) >= 5:
+                        failed_user[ip].popleft()
+
+    return alerts
 
 
-#def ssh_alert_detection(logs: list[dict]) -> dict:
+def ssh_brute_force_success(logs: list[dict], brute_force_alerts: list[dict]) -> list[dict]:
+    # Checks for sucessful login after many failed attempts
+
+    if not brute_force_alerts:
+        return []
+
+    brute_force_success = []
+
+    for log in logs:
+        if log["event"] == "SUCCESS_LOGIN":
+            for alert in brute_force_alerts:
+                if log["ip"] == alert["ip"] and (get_log_mins(log) - get_log_mins({"timestamp": alert["end_time"]}) < 5):
+                    brute_force_success.append({
+                        "alert": "SSH_BRUTE_FORCE_SUCCESS",
+                        "ip": log["ip"],
+                        "time": log["timestamp"],
+                    })
+                    break
+        
+    return brute_force_success
+
+
+def ssh_alert_detection(logs: list[dict]) -> dict:
+    
+    brute_force_alerts = ssh_brute_force_detect(logs)
+    user_enumeration_alerts = ssh_user_enumeration_detect(logs)
+    brute_force_successes = ssh_brute_force_success(logs, brute_force_alerts)
+
+    alerts = {
+        "brute_force_alerts": brute_force_alerts,
+        "user_enumeration_alerts": user_enumeration_alerts,
+        "brute_force_successes": brute_force_successes,
+    }
+
+    return alerts
+
 
                 
 
@@ -150,7 +213,7 @@ def alert_detection(logs: list[dict]) -> str:
 
 
 def main() -> None:
-    print(ssh_brute_force_detect(parse_log("test.log")))
+    print(alert_detection(parse_log("test.log")))
     
 main()
 
