@@ -195,11 +195,7 @@ def ssh_alert_detection(logs: list[dict]) -> dict:
     return alerts
 
 
-                
-
-
-
-def alert_detection(logs: list[dict]) -> str:
+def alert_detection(logs: list[dict]) -> dict:
     
     alert = ""
     
@@ -209,11 +205,19 @@ def alert_detection(logs: list[dict]) -> str:
 
     return alert
 
-
+def ssh_alert_output(alerts: dict) -> None:
+    output = ""
+    for alert_list in alerts.values():
+        for log in alert_list:
+            if log["alert"] == "SSH_BRUTE_FORCE_SUCCESS":
+                output = f"ALERT: {log["alert"]}\nIP: {log["ip"]}\nTime: {log["start_time"]} - {log["end_time"]}"
+            else:
+                output = f"ALERT: {log["alert"]}\nIP: {log["ip"]}\nAttempts: {log["attempts"]}\nTime: {log["start_time"]} - {log["end_time"]}"
+        
+            print(output)
 
 
 def main() -> None:
-    print(alert_detection(parse_log("test.log")))
-    
+    ssh_alert_output(alert_detection(parse_log("test.log")))
 main()
 
