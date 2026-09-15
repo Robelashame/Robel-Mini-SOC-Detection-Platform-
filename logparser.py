@@ -57,6 +57,10 @@ def parse_ssh_log(log_line: str) -> dict:
     event = event_ssh_detection(log_line)
     user, ip = parse_ssh_fields(splitline, event)
 
+    #So that unimportant logs arn't being checked
+    if event == "":
+        return {}
+
     log_entry = {
         "timestamp": timestamp,
         "host": host,
@@ -68,12 +72,58 @@ def parse_ssh_log(log_line: str) -> dict:
 
     return log_entry
 
+def event_sudo_detection(log_line: str) -> str:
+    event = ""
+    
+    if "authentication failure" in log_line:
+        event = "FAILED_AUTHENTICATION"
+    elif "COMMAND=" in log_line:
+        event = "SUDO_COMMAND"
+    
+    return event
+
+def parse_user_sudo(splitline: list[str], event: str) -> str:
+    if event == "FAILED_AUTHENTICATION":
+        for word in splitline:
+            if word.startswith("user=", 1):
+                return word.split("=")[1]
+    
+    if event == "SUDO_COMMAND":
+        for index, word in enumerate(splitline):
+            if word == "sudo:":
+                return splitline[index + 1]
+    
+    return ""
+
+def parse_sudo_log(log_line: str) -> dict:
+    splitline = log_line.split()
+    date_and_time = splitline[0].split("T")
+    timestamp = date_and_time[0].replace("-", " ") + " " + date_and_time[1].split(".")[0]
+    host = splitline[1]
+
+    event = event_sudo_detection(log_line)
+    user = parse_user_sudo(splitline, event)
+
+    #So that unimportant logs arn't being checked
+    if event == "":
+        return {}
+    
+    log_entry = {
+        "timestamp": timestamp,
+        "host": host,
+        "source": "sudo",
+        "event": event, 
+        "user": user, 
+        "ip": "NO_IP"
+    }
+
+    return log_entry
+
 def parse_line(log_line: str) -> dict:
     if "sshd" in log_line:
         return parse_ssh_log(log_line)
     elif "sudo" in log_line:
-        #Put sudo function here
-        return {}
+        return parse_sudo_log(log_line)
     else:
         return {}
 
@@ -83,7 +133,11 @@ def parse_log(log_file: str) -> list[dict]:
 
     with open(log_file, "r") as file:
         for line in file:
-            parsed_log.append(parse_line(line))
+            parsed_line = parse_line(line)
+            if parsed_line == {}:
+                continue
+            else:
+                parsed_log.append(parsed_line)
     
     return parsed_log
 
@@ -197,7 +251,10 @@ def ssh_alert_detection(logs: list[dict]) -> dict:
 
 def alert_detection(logs: list[dict]) -> dict:
     
-    alert = ""
+    alert = {}
+
+    if not logs:
+        return {}
     
     if logs[0]["source"] == "ssh":
         alert = ssh_alert_detection(logs)
@@ -210,9 +267,9 @@ def ssh_alert_output(alerts: dict) -> None:
     for alert_list in alerts.values():
         for log in alert_list:
             if log["alert"] == "SSH_BRUTE_FORCE_SUCCESS":
-                output = f"ALERT: {log["alert"]}\nIP: {log["ip"]}\nTime: {log["start_time"]} - {log["end_time"]}"
+                output = f"ALERT: {log['alert']}\nIP: {log['ip']}\nTime: {log['start_time']} - {log['end_time']}"
             else:
-                output = f"ALERT: {log["alert"]}\nIP: {log["ip"]}\nAttempts: {log["attempts"]}\nTime: {log["start_time"]} - {log["end_time"]}"
+                output = f"ALERT: {log['alert']}\nIP: {log['ip']}\nAttempts: {log['attempts']}\nTime: {log['start_time']} - {log['end_time']}"
         
             print(output)
 
