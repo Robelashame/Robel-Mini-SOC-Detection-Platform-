@@ -82,18 +82,25 @@ def event_sudo_detection(log_line: str) -> str:
     
     return event
 
-def parse_user_sudo(splitline: list[str], event: str) -> str:
+def parse_sudo_fields(splitline: list[str], event: str) -> tuple[str, str]:
+    user = ""
+    tty = ""
+    
     if event == "FAILED_AUTHENTICATION":
         for word in splitline:
-            if word.startswith("user=", 1):
-                return word.split("=")[1]
+            if word.startswith("user="):
+                user = word.split("=", 1)[1]
+            if word.startswith("tty="):
+                tty = word.split("=", 1)[1]
     
     if event == "SUDO_COMMAND":
         for index, word in enumerate(splitline):
             if word == "sudo:":
-                return splitline[index + 1]
+                user = splitline[index + 1]
+            if word.startswith("TTY="):
+                tty = word.split("=", 1)[1]
     
-    return ""
+    return  user, tty
 
 def parse_sudo_log(log_line: str) -> dict:
     splitline = log_line.split()
@@ -102,7 +109,7 @@ def parse_sudo_log(log_line: str) -> dict:
     host = splitline[1]
 
     event = event_sudo_detection(log_line)
-    user = parse_user_sudo(splitline, event)
+    user, tty = parse_sudo_fields(splitline, event)
 
     #So that unimportant logs arn't being checked
     if event == "":
@@ -114,8 +121,14 @@ def parse_sudo_log(log_line: str) -> dict:
         "source": "sudo",
         "event": event, 
         "user": user, 
+        "tty": tty,
         "ip": "NO_IP"
     }
+
+    if event == "SUDO_COMMAND":
+        for word in splitline:
+            if word.startswith("COMMAND="):
+                log_entry["command"] = word.split("=", 1)[1]
 
     return log_entry
 
@@ -144,12 +157,21 @@ def parse_log(log_file: str) -> list[dict]:
 def get_log_mins(log: dict) -> int:
 
     timestamp = log["timestamp"]
-
-    time = timestamp.split(" ")[2]
-    hours = int(time.split(":")[0])
-    minutes = int(time.split(":")[1])
     
-    return (hours * 60) + minutes
+    if log['source'] == "ssh":
+        time = timestamp.split(" ")[2]
+        hours = int(time.split(":")[0])
+        minutes = int(time.split(":")[1])
+    
+        return (hours * 60) + minutes
+    elif log['source'] == "sudo":
+        time = timestamp.split(" ")[2]
+        hours = int(time.split(":")[0])
+        minutes = int(time.split(":")[1])
+    
+        return (hours * 60) + minutes
+    
+    return 0
 
 def ssh_brute_force_detect(logs: list[dict]) -> list[dict]:
     failed_login = {}
@@ -233,6 +255,69 @@ def ssh_brute_force_success(logs: list[dict], brute_force_alerts: list[dict]) ->
         
     return brute_force_success
 
+def sudo_auth_brute_force(logs: list[dict]) -> list[dict]:
+    failed_auth = {}
+    alerts = []
+    danger_user = []
+    for log in logs:
+        if log["event"] == "FAILED_AUTHENTICATION":
+            user = log["user"]
+            if user not in failed_auth:
+                failed_auth[user] = deque()
+            failed_auth[user].append(log)
+            
+            if len(failed_auth[user]) >= 5:
+                if get_log_mins(log) - get_log_mins(failed_auth[user][0]) < 5:
+                    alerts.append({
+                        "alert": "SUDO_BRUTE_FORCE_ATTEMPT",
+                        "user": user,
+                        "tty" : log['tty'],
+                        "attempts": len(failed_auth[user]),
+                        "start_time": failed_auth[user][0]["timestamp"],
+                        "end_time": failed_auth[user][-1]["timestamp"]
+                    })
+                    if user not in danger_user:
+                        danger_user.append(user)
+                    failed_auth[user].clear()
+
+                else:
+                    while get_log_mins(log) - get_log_mins(failed_auth[user][0]) >= 5:
+                        failed_auth[user].popleft()
+
+    return alerts
+
+def sudo_sus_command_detection(logs: list[dict]) -> list[dict]:
+    alerts = []
+    suspicious_commands = [
+        "useradd",
+        "adduser",
+        "usermod",
+        "userdel",
+        "passwd",
+        "chmod",
+        "chown",
+        "visudo",
+        "iptables",
+        "ufw",
+        "systemctl",
+        "service"
+    ]
+
+    for log in logs:
+        for commands in suspicious_commands:
+            if commands in log["command"]:
+                alerts.append({
+                    "alert": "SUDO_SENSITIVE_COMMAND",
+                    "user": log['user'],
+                    "tty" : log['tty'],
+                    "command": log["command"],
+                    "time": log["timestamp"]
+                })
+                break
+    
+    return alerts
+
+    
 
 def ssh_alert_detection(logs: list[dict]) -> dict:
     
@@ -248,6 +333,11 @@ def ssh_alert_detection(logs: list[dict]) -> dict:
 
     return alerts
 
+def sudo_alert_detection(logs: list[dict]) -> dict:
+
+    sudo_brute_force_alerts = sudo_auth_brute_force(logs)
+    sudo_command_alert = sudo_sus_command_detection(logs)
+
 
 def alert_detection(logs: list[dict]) -> dict:
     
@@ -258,6 +348,8 @@ def alert_detection(logs: list[dict]) -> dict:
     
     if logs[0]["source"] == "ssh":
         alert = ssh_alert_detection(logs)
+    elif logs[0]["source"] == "sudo":
+        alert = sudo_alert_detection(logs)
     
 
     return alert
@@ -273,7 +365,8 @@ def ssh_alert_output(alerts: dict) -> None:
         
             print(output)
 
-
+def alert_output(alerts: dict) -> None:
+    
 def main() -> None:
     ssh_alert_output(alert_detection(parse_log("test.log")))
 main()
